@@ -54,8 +54,18 @@ class HealthResponse(BaseModel):
     message: str
 
 # 저장된 Qdrant DB 경로
-saved_db_path = os.getenv("QDRANT_DB_PATH", "/content/drive/MyDrive/Dense_indexing_2/-qdrant")
-collection_name = "qdrant-franchise-db"
+# saved_db_path = os.getenv("QDRANT_DB_PATH", "/content/drive/MyDrive/Dense_indexing_2/-qdrant")
+# collection_name = "qdrant-franchise-db"
+# 환경 변수에서 클라우드 DB 접속 정보를 읽어옵니다.
+qdrant_host = os.getenv("QDRANT_HOST")
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
+
+# 로컬 경로 대신, URL과 API 키로 클라우드 DB에 연결합니다.
+client = QdrantClient(
+    host=qdrant_host,
+    api_key=qdrant_api_key,
+    port=6333  # Qdrant의 기본 포트
+)
 
 def build_dense_retriever():
     """Dense retriever 구축"""
