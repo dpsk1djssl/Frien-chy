@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langchain
+langchain-huggingface
+langchain-google-genai
+langchain-core
+langchain-qdrant
+qdrant-client
+torch
+transformers
+sentence-transformers
+pydantic
