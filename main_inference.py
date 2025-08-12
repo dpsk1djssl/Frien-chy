@@ -11,6 +11,7 @@ import os
 import asyncio
 from typing import Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse # 한글 깨짐 방지를 위해 추가
 from pydantic import BaseModel
 import uvicorn
 
@@ -36,20 +37,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# --- 1. DB 클라이언트 설정 (수정됨) ---
-# 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
-qdrant_host = os.getenv("QDRANT_HOST")
-# DigitalOcean에 직접 설치한 Qdrant는 API 키가 필요 없습니다.
-# qdrant_api_key = os.getenv("QDRANT_API_KEY") 
-
-# 이 client 객체를 앱 전체에서 사용합니다.
-client = QdrantClient(
-    host=qdrant_host,
-    port=6333
-)
-collection_name = "qdrant-franchise-db"
-# ------------------------------------
-
 # 글로벌 변수로 모델들 저장
 chain = None
 
@@ -67,6 +54,19 @@ class HealthResponse(BaseModel):
     status: str
     message: str
 
+# --- DB 클라이언트 설정 (수정됨) ---
+# 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
+qdrant_host = os.getenv("QDRANT_HOST")
+collection_name = "qdrant-franchise-db"
+
+# 이 client 객체를 앱 전체에서 사용합니다.
+# API 키는 DigitalOcean에 직접 설치한 경우 필요 없습니다.
+client = QdrantClient(
+    host=qdrant_host,
+    port=6333
+)
+# ------------------------------------
+
 
 def build_dense_retriever():
     """Dense retriever 구축"""
@@ -80,15 +80,14 @@ def build_dense_retriever():
                 'normalize_embeddings': True,
             }
         )
-        
-        # --- 2. VectorStore 설정 (수정됨) ---
+
+        # VectorStore 래퍼
         # 로컬 경로 대신, 위에서 만든 DigitalOcean 연결용 client를 사용합니다.
         vectorstore = Qdrant(
             client=client, # 전역 client 객체 사용
             collection_name=collection_name,
             embeddings=embedding_model,
         )
-        # ------------------------------------
 
         return vectorstore.as_retriever(
             search_type="similarity",
@@ -266,7 +265,7 @@ async def health_check():
         message="모든 시스템이 정상 작동 중입니다"
     )
 
-@app.post("/ask", response_model=AnswerResponse)
+@app.post("/ask") # 한글 깨짐 방지를 위해 response_model 제거
 async def ask_question(request: QuestionRequest):
     """질문에 대한 답변 생성"""
     global chain
@@ -281,11 +280,13 @@ async def ask_question(request: QuestionRequest):
         # RAG 시스템으로 답변 생성
         answer = chain.invoke(request.question)
 
-        return AnswerResponse(
-            question=request.question,
-            answer=answer,
-            status="success"
-        )
+        # 한글 깨짐 방지를 위해 JSONResponse 사용
+        content = {
+            "question": request.question,
+            "answer": answer,
+            "status": "success"
+        }
+        return JSONResponse(content=content)
 
     except Exception as e:
         raise HTTPException(
