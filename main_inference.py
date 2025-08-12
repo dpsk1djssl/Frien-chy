@@ -36,6 +36,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# --- 1. DB 클라이언트 설정 (수정됨) ---
+# 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
+qdrant_host = os.getenv("QDRANT_HOST")
+# DigitalOcean에 직접 설치한 Qdrant는 API 키가 필요 없습니다.
+# qdrant_api_key = os.getenv("QDRANT_API_KEY") 
+
+# 이 client 객체를 앱 전체에서 사용합니다.
+client = QdrantClient(
+    host=qdrant_host,
+    port=6333
+)
+collection_name = "qdrant-franchise-db"
+# ------------------------------------
+
 # 글로벌 변수로 모델들 저장
 chain = None
 
@@ -53,19 +67,6 @@ class HealthResponse(BaseModel):
     status: str
     message: str
 
-# 저장된 Qdrant DB 경로
-# saved_db_path = os.getenv("QDRANT_DB_PATH", "/content/drive/MyDrive/Dense_indexing_2/-qdrant")
-# collection_name = "qdrant-franchise-db"
-# 환경 변수에서 클라우드 DB 접속 정보를 읽어옵니다.
-qdrant_host = os.getenv("QDRANT_HOST")
-qdrant_api_key = os.getenv("QDRANT_API_KEY")
-
-# 로컬 경로 대신, URL과 API 키로 클라우드 DB에 연결합니다.
-client = QdrantClient(
-    host=qdrant_host,
-    api_key=qdrant_api_key,
-    port=6333  # Qdrant의 기본 포트
-)
 
 def build_dense_retriever():
     """Dense retriever 구축"""
@@ -79,16 +80,15 @@ def build_dense_retriever():
                 'normalize_embeddings': True,
             }
         )
-
-        # Qdrant 클라이언트 (로컬 경로)
-        client = QdrantClient(path=saved_db_path, prefer_grpc=False)
-
-        # VectorStore 래퍼
+        
+        # --- 2. VectorStore 설정 (수정됨) ---
+        # 로컬 경로 대신, 위에서 만든 DigitalOcean 연결용 client를 사용합니다.
         vectorstore = Qdrant(
-            client=client,
+            client=client, # 전역 client 객체 사용
             collection_name=collection_name,
             embeddings=embedding_model,
         )
+        # ------------------------------------
 
         return vectorstore.as_retriever(
             search_type="similarity",
@@ -306,7 +306,7 @@ async def models_status():
         "cuda_available": torch.cuda.is_available(),
         "environment_variables": {
             "GEMINI_API_KEY": "✅" if os.getenv("GEMINI_API_KEY") else "❌",
-            "QDRANT_DB_PATH": os.getenv("QDRANT_DB_PATH", "default_path")
+            "QDRANT_HOST": os.getenv("QDRANT_HOST", "not_set")
         }
     }
 

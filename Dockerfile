@@ -8,8 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. 로컬 Qdrant DB 폴더 전체를 이미지 안으로 복사합니다. (가장 중요!)
-COPY ./qdrant ./qdrant
+
 
 # 5. FastAPI 소스 코드를 복사합니다.
 COPY main_inference.py .
