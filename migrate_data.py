@@ -12,7 +12,7 @@ except ImportError as e:
 
 
 # --- 설정 영역 ---
-# 서정님이 공유한 로컬 DB 폴더 경로
+# 로컬 DB 폴더 경로
 SOURCE_DB_PATH = "./qdrant" 
 # 1단계에서 띄운 로컬 서버 주소
 TARGET_SERVER_URL = "http://localhost:6333"
@@ -96,11 +96,11 @@ def migrate():
     print(f"최종 컬렉션의 포인트 수: {final_info.points_count}")
 
 
-print(f"--- 현재 파일(__name__): {__name__} ---") # 디버깅 체크포인트 3
+print(f"--- 현재 파일(__name__): {__name__} ---")
 
 if __name__ == "__main__":
-    print("--- 메인 실행 블록 진입 ---") # 디버깅 체크포인트 4
+    print("--- 메인 실행 블록 진입 ---")
     migrate()
-    print("--- 스크립트 실행 완료 ---") # 디버깅 체크포인트 5
+    print("--- 스크립트 실행 완료 ---") 
 else:
     print("--- 메인 실행 블록을 건너뛰었습니다 (모듈로 임포트됨) ---")
