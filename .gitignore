@@ -1,1 +1,6 @@
 qdrant/
+venv/
+snapshot.snapshot
+*.env
+.vscode/
+.idea/
