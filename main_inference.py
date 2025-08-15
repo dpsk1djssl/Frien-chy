@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
+# main_inferecne.ipynb
 
 import os
 import asyncio
 from typing import Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse # 한글 깨짐 방지를 위해 추가
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -30,6 +31,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# --- 1. DB 클라이언트 설정 (수정됨) ---
+# 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
+qdrant_host = os.getenv("QDRANT_HOST")
+qdrant_api_key = os.getenv("QDRANT_API_KEY") # API 키를 읽어오도록 수정
+
+collection_name = "franchise-db-by-files"
+
+# 이 client 객체를 앱 전체에서 사용합니다.
+client = QdrantClient(
+    host=qdrant_host,
+    port=6333,
+    api_key=qdrant_api_key # API 키를 사용하도록 수정
+)
+# ------------------------------------
+
 # 글로벌 변수로 모델들 저장
 chain = None
 
@@ -47,25 +63,10 @@ class HealthResponse(BaseModel):
     status: str
     message: str
 
-# --- DB 클라이언트 설정 (수정됨) ---
-# 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
-collection_name = "qdrant-franchise-db"
-qdrant_host = os.getenv("QDRANT_HOST")
-# Qdrant API 키를 환경 변수에서 읽어옵니다.
-qdrant_api_key = os.getenv("QDRANT_API_KEY")
-
-client = QdrantClient(
-    host=qdrant_host,
-    port=6333,
-    api_key=qdrant_api_key # api_key 파라미터를 추가합니다.
-)
-# ------------------------------------
-
 
 def build_dense_retriever():
     """Dense retriever 구축"""
     try:
-        # Initialize embeddings
         embedding_model = HuggingFaceEmbeddings(
             model_name="nlpai-lab/KURE-v1",
             model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
@@ -74,11 +75,9 @@ def build_dense_retriever():
                 'normalize_embeddings': True,
             }
         )
-
-        # VectorStore 래퍼
-        # 로컬 경로 대신, 위에서 만든 DigitalOcean 연결용 client를 사용합니다.
+        
         vectorstore = Qdrant(
-            client=client, # 전역 client 객체 사용
+            client=client,
             collection_name=collection_name,
             embeddings=embedding_model,
         )
@@ -144,8 +143,7 @@ def initialize_llm():
     return llm
 
 def create_chain(dense_retriever, filter_tokenizer, filter_model, reranker, prompt, llm):
-    """RAG 체인 생성"""
-    # 필터링 함수
+    """RAG 체인 생성 (전체 기능 복원)"""
     def filter_docs(inputs):
         docs, query = inputs['context'], inputs['question']
         scored_docs = []
@@ -165,7 +163,6 @@ def create_chain(dense_retriever, filter_tokenizer, filter_model, reranker, prom
         top_docs = [doc for _, doc in sorted_docs[:10]] if sorted_docs else []
         return {"context": top_docs, "question": query}
 
-    # 리랭킹 함수
     def rerank_docs(docs_query):
         docs, query = docs_query['context'], docs_query['question']
         if not docs:
@@ -176,7 +173,6 @@ def create_chain(dense_retriever, filter_tokenizer, filter_model, reranker, prom
         top_docs = [doc for _, doc in reranked[:5]]
         return {"context": top_docs, "question": query}
 
-    # Create Chain
     chain = (
         {"context": dense_retriever, "question": RunnablePassthrough()}
         | RunnableLambda(filter_docs)
@@ -188,23 +184,13 @@ def create_chain(dense_retriever, filter_tokenizer, filter_model, reranker, prom
     return chain
 
 async def initialize_models():
-    """모든 모델을 초기화하는 함수"""
+    """모든 모델을 초기화하는 함수 (전체 기능 복원)"""
     try:
         print(" 모델 초기화를 시작합니다...")
-
-        # Dense retriever 구축
-        print("Dense retriever 로딩 중...")
         retriever = build_dense_retriever()
-
-        # Prompt 생성
-        print("프롬프트 템플릿 생성 중...")
         prompt = create_prompt()
-
-        # LLM 초기화
-        print(" LLM 초기화 중...")
         llm = initialize_llm()
-
-        # Post-retrieval 모델들 설정
+        
         print("필터링 모델 로딩 중...")
         filter_tokenizer = AutoTokenizer.from_pretrained("klue/roberta-base")
         filter_model = AutoModelForSequenceClassification.from_pretrained("klue/roberta-base", num_labels=2)
@@ -216,7 +202,6 @@ async def initialize_models():
         print("리랭커 로딩 중...")
         reranker = CrossEncoder("BAAI/bge-reranker-base", device=device)
 
-        # 체인 생성
         print("RAG 체인 구성 중...")
         chain = create_chain(retriever, filter_tokenizer, filter_model, reranker, prompt, llm)
 
@@ -229,7 +214,6 @@ async def initialize_models():
 
 @app.on_event("startup")
 async def startup_event():
-    """서버 시작 시 모델 로딩"""
     global chain
     try:
         chain = await initialize_models()
@@ -240,7 +224,6 @@ async def startup_event():
 
 @app.get("/", response_model=dict)
 async def root():
-    """루트 엔드포인트"""
     return {
         "message": "프랜차이즈 QA API에 오신 것을 환영합니다!",
         "docs": "/docs",
@@ -249,17 +232,12 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """헬스 체크 엔드포인트"""
     global chain
     if chain is None:
         raise HTTPException(status_code=503, detail="모델이 아직 로딩되지 않았습니다")
+    return HealthResponse(status="healthy", message="모든 시스템이 정상 작동 중입니다")
 
-    return HealthResponse(
-        status="healthy",
-        message="모든 시스템이 정상 작동 중입니다"
-    )
-
-@app.post("/ask") # 한글 깨짐 방지를 위해 response_model 제거
+@app.post("/ask") 
 async def ask_question(request: QuestionRequest):
     """질문에 대한 답변 생성"""
     global chain
@@ -271,10 +249,8 @@ async def ask_question(request: QuestionRequest):
         raise HTTPException(status_code=400, detail="질문이 비어있습니다")
 
     try:
-        # RAG 시스템으로 답변 생성
         answer = chain.invoke(request.question)
-
-        # 한글 깨짐 방지를 위해 JSONResponse 사용
+        
         content = {
             "question": request.question,
             "answer": answer,
@@ -290,18 +266,16 @@ async def ask_question(request: QuestionRequest):
 
 @app.get("/models/status")
 async def models_status():
-    """모델 상태 확인"""
     global chain
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
     return {
         "chain_loaded": chain is not None,
         "device": device,
         "cuda_available": torch.cuda.is_available(),
         "environment_variables": {
             "GEMINI_API_KEY": "✅" if os.getenv("GEMINI_API_KEY") else "❌",
-            "QDRANT_HOST": os.getenv("QDRANT_HOST", "not_set")
+            "QDRANT_HOST": os.getenv("QDRANT_HOST", "not_set"),
+            "QDRANT_API_KEY": "✅" if os.getenv("QDRANT_API_KEY") else "❌"
         }
     }
 
