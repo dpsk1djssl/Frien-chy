@@ -49,14 +49,15 @@ class HealthResponse(BaseModel):
 
 # --- DB 클라이언트 설정 (수정됨) ---
 # 환경 변수에서 DigitalOcean 서버 접속 정보를 읽어옵니다.
-qdrant_host = os.getenv("QDRANT_HOST")
 collection_name = "qdrant-franchise-db"
+qdrant_host = os.getenv("QDRANT_HOST")
+# Qdrant API 키를 환경 변수에서 읽어옵니다.
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
-# 이 client 객체를 앱 전체에서 사용합니다.
-# API 키는 DigitalOcean에 직접 설치한 경우 필요 없습니다.
 client = QdrantClient(
     host=qdrant_host,
-    port=6333
+    port=6333,
+    api_key=qdrant_api_key # api_key 파라미터를 추가합니다.
 )
 # ------------------------------------
 
