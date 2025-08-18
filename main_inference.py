@@ -127,7 +127,7 @@ def build_llm():
 
 def build_reranker(top_n: int = FINAL_TOPK):
     # LangChain CrossEncoderReranker wrapper (internally uses sentence-transformers)
-    return CrossEncoderReranker(model_name=RERANK_MODEL, top_n=top_n)
+    return CrossEncoderReranker(model=RERANK_MODEL, top_n=top_n)
 
 # --------------------
 # Utilities
