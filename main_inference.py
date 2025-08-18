@@ -36,7 +36,7 @@ try:
         torch.set_num_interop_threads(1)
 except Exception:
     pass
-PORT = int(os.getenv("PORT", "5000"))
+PORT = int(os.getenv("PORT", "8000"))
 UVICORN_WORKERS = int(os.getenv("UVICORN_WORKERS", "1"))
 # ------------------------------------------------------------
 
@@ -50,6 +50,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from langchain_community.vectorstores import Qdrant as LCQdrant
 from qdrant_client import QdrantClient
+from sentence_transformers import CrossEncoder # --- 리랭커 모델 객체 생성을 위해 추가 ---
 
 # Reranker (LangChain) — support both modern/community and older paths
 try:
@@ -65,10 +66,10 @@ CFG_NAME = "GS_k10_fscore_pc5_rrbge_lite2"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-K_RETRIEVE = 10            # retrieve k=10
-PRE_CUT_TOPN = 5           # cut to 5 before reranker
+K_RETRIEVE = 10           # retrieve k=10
+PRE_CUT_TOPN = 5          # cut to 5 before reranker
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-FINAL_TOPK = 5             # feed 5 docs to LLM
+FINAL_TOPK = 5            # feed 5 docs to LLM
 
 # --------------------
 # Builders
@@ -126,8 +127,9 @@ def build_llm():
     )
 
 def build_reranker(top_n: int = FINAL_TOPK):
-    # LangChain CrossEncoderReranker wrapper (internally uses sentence-transformers)
-    return CrossEncoderReranker(model=RERANK_MODEL, top_n=top_n)
+    # --- 수정된 부분: 모델 이름(str) 대신 모델 객체(CrossEncoder)를 전달 ---
+    model = CrossEncoder(RERANK_MODEL, device=DEVICE)
+    return CrossEncoderReranker(model=model, top_n=top_n)
 
 # --------------------
 # Utilities
