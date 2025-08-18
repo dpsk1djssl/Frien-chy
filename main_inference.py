@@ -52,12 +52,6 @@ from langchain_community.vectorstores import Qdrant as LCQdrant
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder # --- 리랭커 모델 객체 생성을 위해 추가 ---
 
-# Reranker (LangChain) — support both modern/community and older paths
-try:
-    from langchain.retrievers.document_compressors import CrossEncoderReranker
-except Exception:
-    from langchain_community.document_transformers import CrossEncoderReranker
-
 # --------------------
 # Fixed config
 # --------------------
@@ -126,10 +120,10 @@ def build_llm():
         temperature=0.1,
     )
 
-def build_reranker(top_n: int = FINAL_TOPK):
-    # --- 수정된 부분: 모델 이름(str) 대신 모델 객체(CrossEncoder)를 전달 ---
-    model = CrossEncoder(RERANK_MODEL, device=DEVICE)
-    return CrossEncoderReranker(model=model, top_n=top_n)
+# --- 수정된 부분: build_reranker 함수를 build_reranker_model로 변경 ---
+def build_reranker_model():
+    """sentence_transformers의 CrossEncoder 모델 객체를 직접 생성합니다."""
+    return CrossEncoder(RERANK_MODEL, device=DEVICE)
 
 # --------------------
 # Utilities
@@ -224,7 +218,8 @@ app = FastAPI(
 PRE_CUT_TOPN = 5
 MIN_SCORE = float(os.getenv("QDRANT_MIN_SCORE", "0.5"))
 
-def create_chain(dense_retriever, reranker, prompt, llm):
+# --- 수정된 부분: create_chain 함수가 reranker_model을 직접 받도록 변경 ---
+def create_chain(dense_retriever, reranker_model, prompt, llm):
     # 1) score-only 필터 (Qdrant 점수 임계치 적용)
     def score_filter(inputs):
         q, docs = inputs["question"], inputs["docs"]
@@ -237,12 +232,18 @@ def create_chain(dense_retriever, reranker, prompt, llm):
     def precut(inputs):
         return {"question": inputs["question"], "docs": inputs["docs"][:PRE_CUT_TOPN]}
 
-    # 3) CE rerank top-5 (LangChain wrapper handles scoring + top_n cut)
+    # 3) CE rerank top-5 (CrossEncoder 객체를 직접 사용)
     def ce_rerank(inputs):
         q, docs = inputs["question"], inputs["docs"]
         if not docs:
             return {"question": q, "docs": []}
-        top_docs = reranker.compress_documents(docs, q)  # top_n=5 set in build_reranker
+        
+        pairs = [[q, doc.page_content] for doc in docs]
+        scores = reranker_model.predict(pairs)
+        
+        scored_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        
+        top_docs = [doc for score, doc in scored_docs[:FINAL_TOPK]]
         return {"question": q, "docs": top_docs}
 
     # 4) payload for LLM
@@ -275,8 +276,10 @@ def on_startup():
     embeddings = build_embeddings()
     vs, collection = build_qdrant_vectorstore(embeddings)
     retriever = vs.as_retriever(search_kwargs={"k": K_RETRIEVE})
-    reranker = build_reranker(top_n=FINAL_TOPK)
+    # --- 수정된 부분: reranker 모델을 직접 생성 ---
+    reranker = build_reranker_model()
     llm = build_llm()
+    # --- 수정된 부분: reranker 모델 객체를 create_chain에 전달 ---
     chain = create_chain(retriever, reranker, PROMPT, llm)
 
     state.embeddings = embeddings
