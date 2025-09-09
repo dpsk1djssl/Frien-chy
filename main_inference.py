@@ -256,17 +256,13 @@ if not DATABASE_URL:
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
     """
-    PostgreSQL을 사용하여 세션별 대화 기록을 영구적으로 관리합니다.
-    DATABASE_URL 환경 변수를 사용하여 DB 연결 객체를 직접 생성하고,
-    'sync_connection' 인자로 전달합니다.
+    모든 인자에 명시적으로 이름표(keyword argument)를 붙여
+    라이브러리 업데이트에 따른 혼동을 원천적으로 방지합니다.
     """
-    # DB 연결 객체 생성
     sync_connection = psycopg.connect(os.getenv("DATABASE_URL"))
-    
-    # 생성된 객체를 사용하여 History 객체 반환
     return PostgresChatMessageHistory(
-        session_id,
-        "message_store",
+        session_id=session_id,
+        table_name="message_store",
         sync_connection=sync_connection
     )
 
