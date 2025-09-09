@@ -13,3 +13,5 @@ pydantic
 langchain-community
 sentence-transformers
 langgraph 
+psycopg2-binary
+langchain-postgres 

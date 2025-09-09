@@ -21,6 +21,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_postgres import PostgresChatMessageHistory
 from langchain.memory import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
@@ -232,7 +233,7 @@ def build_graph(retriever, reranker_model, llm):
     return graph.compile()
 
 # --------------------
-# FastAPI App & Memory
+# FastAPI App & Permanent Memory
 # --------------------
 class QuestionRequest(BaseModel):
     question: str
@@ -245,15 +246,23 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.1.0")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.2.0")
 
 # 임시 메모리 저장소
-store = {}
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = ChatMessageHistory()
-    return store[session_id]
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    """
+    PostgreSQL을 사용하여 세션별 대화 기록을 영구적으로 관리합니다.
+    테이블이 없으면 자동으로 생성해줍니다.
+    """
+    return PostgresChatMessageHistory(
+        session_id=session_id,
+        connection_string=DATABASE_URL,
+        table_name="message_store" # DB에 생성될 테이블 이름
+    )
 @app.on_event("startup")
 def on_startup():
     embeddings = build_embeddings()
