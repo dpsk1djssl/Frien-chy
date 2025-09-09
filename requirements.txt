@@ -12,3 +12,4 @@ sentence-transformers
 pydantic
 langchain-community
 sentence-transformers
+langgraph 
