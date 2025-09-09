@@ -254,15 +254,12 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    """
-    PostgreSQL을 사용하여 세션별 대화 기록을 영구적으로 관리합니다.
-    테이블이 없으면 자동으로 생성해줍니다.
-    """
     return PostgresChatMessageHistory(
-        session_id=session_id,
-        connection_string=DATABASE_URL,
-        table_name="message_store" # DB에 생성될 테이블 이름
+        session_id,                      
+        "message_store",                 
+        connection_string=DATABASE_URL   
     )
+
 @app.on_event("startup")
 def on_startup():
     embeddings = build_embeddings()
