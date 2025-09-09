@@ -8,6 +8,7 @@
 # 3. 질문 재구성: 대화 맥락을 파악하여 후속 질문을 독립적인 질문으로 재구성하는 'contextualize_question' 노드를 그래프의 시작점으로 추가했습니다.
 
 import os
+import uuid  # <---- [수정 1] uuid 라이브러리를 가져옵니다.
 from typing import List, Dict, Any, TypedDict
 
 import torch
@@ -27,7 +28,7 @@ from langchain.memory import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerEAI
 from langchain_community.vectorstores import Qdrant as LCQdrant
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder
@@ -35,7 +36,7 @@ from sentence_transformers import CrossEncoder
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_History_v3.1"
+CFG_NAME = "LangGraph_With_History_v3.2_UUID_Fix" # 버전 이름 수정
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -75,7 +76,7 @@ def build_qdrant_vectorstore(embeddings):
 
 def build_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro",
+        model="gemini-1.5-flash", # 모델 이름을 최신 버전으로 변경 (gemini-2.5-pro는 아직 정식 출시되지 않음)
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.1,
     )
@@ -87,7 +88,6 @@ def build_reranker_model():
 # Utilities
 # --------------------
 def concat_context(docs: List[Document], max_chars: int = 4000, sep: str = "\n---\n"):
-    # ...(이전과 동일)...
     out, n = [], 0
     for d in docs:
         t = (d.page_content or "").strip()
@@ -103,7 +103,6 @@ def serialize_doc(d: Document) -> dict:
     return {"page_content": d.page_content or "", "metadata": d.metadata or {}}
 
 def _get_qdrant_score(d: Document) -> float:
-    # ...(이전과 동일)...
     md = d.metadata or {}
     for k in ("_qdrant_score", "score", "similarity"):
         if k in md:
@@ -149,9 +148,7 @@ def build_graph(retriever, reranker_model, llm):
     
     contextualize_q_chain = CONTEXTUALIZE_QUESTION_PROMPT | llm | StrOutputParser()
     
-    # 1. (NEW) Contextualize Question Node
     def contextualize_question(state: GraphState):
-        """대화 기록을 바탕으로 질문을 재구성합니다."""
         if state.get("chat_history"):
             contextualized_question = contextualize_q_chain.invoke(
                 {"question": state["question"], "chat_history": state["chat_history"]}
@@ -160,27 +157,19 @@ def build_graph(retriever, reranker_model, llm):
         else:
             return {"question": state["question"]}
 
-    # 2. Retrieval Node
     def retrieve(state: GraphState):
-        """질문을 사용하여 문서를 검색합니다."""
         docs = retriever.invoke(state["question"])
         return {"docs": docs, "question": state["question"]}
 
-    # 3. Filtering Node
     def filter_docs(state: GraphState):
-        """스코어 기준으로 문서를 필터링합니다."""
         docs = [d for d in state["docs"] if _get_qdrant_score(d) >= MIN_SCORE]
-        if not docs: docs = state["docs"] # 필터링 후 문서가 없으면 원본 사용
+        if not docs: docs = state["docs"]
         return {"docs": docs}
 
-    # 4. Precut Node
     def precut(state: GraphState):
-        """리랭커에 전달할 문서 수를 자릅니다."""
         return {"docs": state["docs"][:PRE_CUT_TOPN]}
 
-    # 5. Rerank Node
     def rerank(state: GraphState):
-        """CrossEncoder를 사용해 문서를 재정렬합니다."""
         question = state["question"]
         docs = state["docs"]
         if not docs:
@@ -192,9 +181,7 @@ def build_graph(retriever, reranker_model, llm):
         reranked_docs = [doc for score, doc in scored_docs[:FINAL_TOPK]]
         return {"docs": reranked_docs}
 
-    # 6. LLM QA Node
     def generate_answer(state: GraphState):
-        """최종 답변을 생성합니다."""
         question = state["question"]
         docs = state["docs"]
         
@@ -213,8 +200,6 @@ def build_graph(retriever, reranker_model, llm):
         }
 
     graph = StateGraph(GraphState)
-
-    # Add nodes
     graph.add_node("contextualize_question", contextualize_question)
     graph.add_node("retrieval", retrieve)
     graph.add_node("filter", filter_docs)
@@ -222,7 +207,6 @@ def build_graph(retriever, reranker_model, llm):
     graph.add_node("rerank", rerank)
     graph.add_node("generate_answer", generate_answer)
 
-    # Build graph
     graph.set_entry_point("contextualize_question")
     graph.add_edge("contextualize_question", "retrieval")
     graph.add_edge("retrieval", "filter")
@@ -247,21 +231,18 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.2.0")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.2.1")
 
-# 임시 메모리 저장소
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    sync_connection = psycopg.connect(os.getenv("DATABASE_URL"))
-    # 1. table_name ("message_store")을 먼저, 이름표 없이
-    # 2. session_id 를 두 번째로, 이름표 없이
-    # 3. sync_connection 은 이름표를 붙여서 전달
+    # 이 함수는 이제 항상 유효한 UUID 문자열을 받게 됩니다.
+    sync_connection = psycopg.connect(DATABASE_URL)
     return PostgresChatMessageHistory(
-        "message_store",
-        session_id,
+        table_name="message_store", # LangChain v0.2.0 부터는 키워드 인자(table_name) 사용을 권장합니다.
+        session_id=session_id,
         sync_connection=sync_connection
     )
 
@@ -272,10 +253,8 @@ def on_startup():
     reranker_model = build_reranker_model()
     llm = build_llm()
     
-    # LangGraph 생성
     graph = build_graph(retriever, reranker_model, llm)
     
-    # LangGraph에 메모리 기능 래핑
     app.state.chain_with_history = RunnableWithMessageHistory(
         graph,
         get_session_history,
@@ -293,7 +272,12 @@ def ask(req: QuestionRequest):
         raise HTTPException(status_code=400, detail="session_id가 비어 있습니다.")
         
     try:
-        config = {"configurable": {"session_id": req.session_id.strip()}}
+        # <---- [수정 2] 핵심 수정 사항: session_id를 UUID로 변환합니다.
+        # 사용자가 제공한 모든 문자열 ID를 일관된 UUID로 변환합니다.
+        # 이렇게 하면 'db-test-001'과 같은 ID를 그대로 사용할 수 있습니다.
+        session_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, req.session_id.strip()))
+        
+        config = {"configurable": {"session_id": session_uuid}}
         result = app.state.chain_with_history.invoke(
             {"question": req.question.strip()}, 
             config=config
