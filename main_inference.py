@@ -255,14 +255,13 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    """
-    모든 인자에 명시적으로 이름표(keyword argument)를 붙여
-    라이브러리 업데이트에 따른 혼동을 원천적으로 방지합니다.
-    """
     sync_connection = psycopg.connect(os.getenv("DATABASE_URL"))
+    # 1. table_name ("message_store")을 먼저, 이름표 없이
+    # 2. session_id 를 두 번째로, 이름표 없이
+    # 3. sync_connection 은 이름표를 붙여서 전달
     return PostgresChatMessageHistory(
-        session_id=session_id,
-        table_name="message_store",
+        "message_store",
+        session_id,
         sync_connection=sync_connection
     )
 
