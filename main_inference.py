@@ -14,6 +14,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
+import psycopg
 
 from langgraph.graph import StateGraph, END
 from langchain_core.documents import Document
