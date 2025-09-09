@@ -254,10 +254,14 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    """
+    PostgreSQL을 사용하여 세션별 대화 기록을 영구적으로 관리합니다.
+    이 함수는 connection_string을 인자로 받지 않으며,
+    라이브러리가 자동으로 DATABASE_URL 환경 변수를 읽어서 연결합니다.
+    """
     return PostgresChatMessageHistory(
-        session_id,                      
-        "message_store",                 
-        connection_string=DATABASE_URL   
+        session_id,
+        "message_store"
     )
 
 @app.on_event("startup")
