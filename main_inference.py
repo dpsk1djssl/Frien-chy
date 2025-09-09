@@ -8,7 +8,7 @@
 # 3. 질문 재구성: 대화 맥락을 파악하여 후속 질문을 독립적인 질문으로 재구성하는 'contextualize_question' 노드를 그래프의 시작점으로 추가했습니다.
 
 import os
-import uuid  # <---- [수정 1] uuid 라이브러리를 가져옵니다.
+import uuid
 from typing import List, Dict, Any, TypedDict
 
 import torch
@@ -24,19 +24,21 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_postgres import PostgresChatMessageHistory
-from langchain.memory import ChatMessageHistory
+# <---- [수정 1] DeprecationWarning 해결: 새로운 경로에서 import 합니다.
+from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerEAI
-from langchain_community.vectorstores import Qdrant as LCQdrant
+# <---- [수정 2] ImportError 해결: 올바른 클래스 이름으로 수정합니다.
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Qdrant as LCQdant
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder
 
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_History_v3.2_UUID_Fix" # 버전 이름 수정
+CFG_NAME = "LangGraph_With_History_v3.3_Fix"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -65,7 +67,7 @@ def build_qdrant_vectorstore(embeddings):
         https=False
     )
     collection = os.getenv("QDRANT_COLLECTION", "franchise-db-1")
-    vs = LCQdrant(
+    vs = LCQdant(
         client=client,
         collection_name=collection,
         embeddings=embeddings,
@@ -75,8 +77,9 @@ def build_qdrant_vectorstore(embeddings):
     return vs.as_retriever(search_kwargs={"k": K_RETRIEVE}), collection
 
 def build_llm():
+    # <---- [수정 2] ImportError 해결: 올바른 클래스 이름으로 수정합니다.
     return ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash", # 모델 이름을 최신 버전으로 변경 (gemini-2.5-pro는 아직 정식 출시되지 않음)
+        model="gemini-1.5-flash",
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.1,
     )
@@ -231,17 +234,16 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.2.1")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.3.0")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    # 이 함수는 이제 항상 유효한 UUID 문자열을 받게 됩니다.
     sync_connection = psycopg.connect(DATABASE_URL)
     return PostgresChatMessageHistory(
-        table_name="message_store", # LangChain v0.2.0 부터는 키워드 인자(table_name) 사용을 권장합니다.
+        table_name="message_store",
         session_id=session_id,
         sync_connection=sync_connection
     )
@@ -272,9 +274,6 @@ def ask(req: QuestionRequest):
         raise HTTPException(status_code=400, detail="session_id가 비어 있습니다.")
         
     try:
-        # <---- [수정 2] 핵심 수정 사항: session_id를 UUID로 변환합니다.
-        # 사용자가 제공한 모든 문자열 ID를 일관된 UUID로 변환합니다.
-        # 이렇게 하면 'db-test-001'과 같은 ID를 그대로 사용할 수 있습니다.
         session_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, req.session_id.strip()))
         
         config = {"configurable": {"session_id": session_uuid}}
