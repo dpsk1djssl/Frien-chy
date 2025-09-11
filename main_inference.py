@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 # main_inference_final.py
-# LangGraph의 유연한 구조와 대화 메모리 기능을 결합한 최종 버전입니다.
-#
-# 주요 특징:
-# 1. LangGraph 기반: 각 RAG 단계를 명확한 '노드'로 정의하여 가독성과 확장성을 높였습니다.
-# 2. 메모리 기능 완비: RunnableWithMessageHistory를 사용하여 LangGraph 전체에 대화 기록 관리 기능을 적용했습니다.
-# 3. 질문 재구성: 대화 맥락을 파악하여 후속 질문을 독립적인 질문으로 재구성하는 'contextualize_question' 노드를 그래프의 시작점으로 추가했습니다.
+# LangGraph의 유연한 구조와 PostgreSQL 기반 영구 메모리 기능을 결합한 최종 버전
 
 import os
 import uuid
@@ -27,14 +22,18 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.vectorstores import Qdrant as LCQdant
+from langchain_community.vectorstores import Qdrant as LCQdrant
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder
+
+# PostgreSQL 관련 import
+import psycopg
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_History_v3.4_Fixed"
+CFG_NAME = "LangGraph_With_PostgreSQL_v3.5"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -63,7 +62,7 @@ def build_qdrant_vectorstore(embeddings):
         https=False
     )
     collection = os.getenv("QDRANT_COLLECTION", "franchise-db-1")
-    vs = LCQdant(
+    vs = LCQdrant(
         client=client,
         collection_name=collection,
         embeddings=embeddings,
@@ -81,6 +80,91 @@ def build_llm():
 
 def build_reranker_model():
     return CrossEncoder(RERANK_MODEL, device=DEVICE)
+
+# --------------------
+# Custom PostgreSQL Chat Message History
+# --------------------
+class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
+    """PostgreSQL 기반의 커스텀 채팅 메시지 히스토리"""
+    
+    def __init__(self, session_id: str, connection_string: str, table_name: str = "message_store"):
+        self.session_id = session_id
+        self.connection_string = connection_string
+        self.table_name = table_name
+        
+        # 테이블 생성
+        self._create_table_if_not_exists()
+    
+    def _create_table_if_not_exists(self):
+        """메시지 저장 테이블이 없으면 생성"""
+        with psycopg.connect(self.connection_string) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {self.table_name} (
+                        id SERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        message_type TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
+                # 인덱스 생성
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{self.table_name}_session_id 
+                    ON {self.table_name} (session_id);
+                """)
+                conn.commit()
+    
+    @property
+    def messages(self) -> List[BaseMessage]:
+        """세션의 모든 메시지 조회"""
+        messages = []
+        try:
+            with psycopg.connect(self.connection_string) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT message_type, content FROM {self.table_name} "
+                        f"WHERE session_id = %s ORDER BY created_at ASC",
+                        (self.session_id,)
+                    )
+                    for message_type, content in cur.fetchall():
+                        if message_type == "human":
+                            messages.append(HumanMessage(content=content))
+                        elif message_type == "ai":
+                            messages.append(AIMessage(content=content))
+        except Exception as e:
+            print(f"메시지 조회 오류: {e}")
+        
+        return messages
+    
+    def add_message(self, message: BaseMessage) -> None:
+        """새 메시지 추가"""
+        try:
+            message_type = "human" if isinstance(message, HumanMessage) else "ai"
+            with psycopg.connect(self.connection_string) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"INSERT INTO {self.table_name} (session_id, message_type, content) "
+                        f"VALUES (%s, %s, %s)",
+                        (self.session_id, message_type, message.content)
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"메시지 추가 오류: {e}")
+    
+    def clear(self) -> None:
+        """세션의 모든 메시지 삭제"""
+        try:
+            with psycopg.connect(self.connection_string) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {self.table_name} WHERE session_id = %s",
+                        (self.session_id,)
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"메시지 삭제 오류: {e}")
 
 # --------------------
 # Utilities
@@ -216,7 +300,7 @@ def build_graph(retriever, reranker_model, llm):
     return graph.compile()
 
 # --------------------
-# FastAPI App & In-Memory for now (PostgreSQL connection removed temporarily)
+# FastAPI App with PostgreSQL Memory
 # --------------------
 class QuestionRequest(BaseModel):
     question: str
@@ -229,18 +313,31 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.4.0")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + PostgreSQL Memory)", version="3.5.0")
 
-# 임시로 인메모리 저장소 사용 (PostgreSQL 문제 해결 후 다시 전환 예정)
-store = {}
+# PostgreSQL 연결 정보
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = ChatMessageHistory()
-    return store[session_id]
+    """PostgreSQL 기반 세션 히스토리 반환"""
+    return CustomPostgresChatMessageHistory(
+        session_id=session_id,
+        connection_string=DATABASE_URL,
+        table_name="message_store"
+    )
 
 @app.on_event("startup")
 def on_startup():
+    # DB 연결 테스트
+    try:
+        test_history = get_session_history("test_connection")
+        print("PostgreSQL 연결 성공!")
+    except Exception as e:
+        print(f"PostgreSQL 연결 실패: {e}")
+        raise
+    
     embeddings = build_embeddings()
     retriever, collection = build_qdrant_vectorstore(embeddings)
     reranker_model = build_reranker_model()
@@ -284,10 +381,39 @@ def ask(req: QuestionRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# 건강 체크 엔드포인트 추가
+# 건강 체크 및 DB 상태 확인 엔드포인트
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "config": CFG_NAME}
+    try:
+        # PostgreSQL 연결 테스트
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
+    return {
+        "status": "healthy", 
+        "config": CFG_NAME,
+        "database": db_status
+    }
+
+# 세션 기록 조회 엔드포인트 (디버깅용)
+@app.get("/debug/history/{session_id}")
+def get_debug_history(session_id: str):
+    try:
+        session_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, session_id.strip()))
+        history = get_session_history(session_uuid)
+        messages = history.messages
+        return {
+            "session_id": session_id,
+            "session_uuid": session_uuid,
+            "message_count": len(messages),
+            "messages": [{"type": type(msg).__name__, "content": msg.content} for msg in messages]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
