@@ -15,7 +15,6 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
-import psycopg
 
 from langgraph.graph import StateGraph, END
 from langchain_core.documents import Document
@@ -23,13 +22,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_postgres import PostgresChatMessageHistory
-# <---- [수정 1] DeprecationWarning 해결: 새로운 경로에서 import 합니다.
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from langchain_huggingface import HuggingFaceEmbeddings
-# <---- [수정 2] ImportError 해결: 올바른 클래스 이름으로 수정합니다.
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import Qdrant as LCQdant
 from qdrant_client import QdrantClient
@@ -38,7 +34,7 @@ from sentence_transformers import CrossEncoder
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_History_v3.3_Fix"
+CFG_NAME = "LangGraph_With_History_v3.4_Fixed"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -77,7 +73,6 @@ def build_qdrant_vectorstore(embeddings):
     return vs.as_retriever(search_kwargs={"k": K_RETRIEVE}), collection
 
 def build_llm():
-    # <---- [수정 2] ImportError 해결: 올바른 클래스 이름으로 수정합니다.
     return ChatGoogleGenerativeAI(
         model="gemini-1.5-flash",
         google_api_key=os.getenv("GEMINI_API_KEY"),
@@ -221,7 +216,7 @@ def build_graph(retriever, reranker_model, llm):
     return graph.compile()
 
 # --------------------
-# FastAPI App & Permanent Memory
+# FastAPI App & In-Memory for now (PostgreSQL connection removed temporarily)
 # --------------------
 class QuestionRequest(BaseModel):
     question: str
@@ -234,19 +229,15 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.3.0")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + Memory)", version="3.4.0")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL 환경 변수가 설정되지 않았습니다.")
+# 임시로 인메모리 저장소 사용 (PostgreSQL 문제 해결 후 다시 전환 예정)
+store = {}
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    sync_connection = psycopg.connect(DATABASE_URL)
-    return PostgresChatMessageHistory(
-        table_name="message_store",
-        session_id=session_id,
-        sync_connection=sync_connection
-    )
+    if session_id not in store:
+        store[session_id] = ChatMessageHistory()
+    return store[session_id]
 
 @app.on_event("startup")
 def on_startup():
@@ -292,6 +283,11 @@ def ask(req: QuestionRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+# 건강 체크 엔드포인트 추가
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "config": CFG_NAME}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
