@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # main_inference_final.py
-# LangGraph + PostgreSQL Memory 완전 수정 버전
+# LangGraph + PostgreSQL Memory 개선 버전
 
 import os
 import uuid
@@ -30,13 +30,13 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_PostgreSQL_v4.1_Fixed"
+CFG_NAME = "LangGraph_With_PostgreSQL_v4.2_Improved"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-K_RETRIEVE = 10
-FINAL_TOPK = 5
-MIN_SCORE = float(os.getenv("QDRANT_MIN_SCORE", "0.5"))
+K_RETRIEVE = 15  # 검색량 증가
+FINAL_TOPK = 7   # 최종 선택량 증가
+MIN_SCORE = float(os.getenv("QDRANT_MIN_SCORE", "0.45"))  # 임계값 하향 조정
 
 # --------------------
 # Builders
@@ -74,16 +74,17 @@ def build_llm():
     )
 
 # --------------------
-# Custom PostgreSQL Chat Message History
+# Custom PostgreSQL Chat Message History (개선됨)
 # --------------------
 class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
-    """PostgreSQL 기반의 커스텀 채팅 메시지 히스토리"""
+    """PostgreSQL 기반의 커스텀 채팅 메시지 히스토리 (개선됨)"""
     
     def __init__(self, session_id: str, connection_string: str, table_name: str = "message_store"):
         self.session_id = session_id
         self.connection_string = connection_string
         self.table_name = table_name
         self._create_table_if_not_exists()
+        self._messages_cache = None  # 캐싱 추가
 
     def _create_table_if_not_exists(self):
         """메시지 저장 테이블이 없으면 생성"""
@@ -104,9 +105,8 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                 """)
                 conn.commit()
 
-    @property
-    def messages(self) -> List[BaseMessage]:
-        """세션의 모든 메시지 조회"""
+    def _refresh_cache(self):
+        """메시지 캐시 새로고침"""
         messages = []
         try:
             with psycopg.connect(self.connection_string) as conn:
@@ -123,7 +123,14 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                             messages.append(AIMessage(content=content))
         except Exception as e:
             print(f"메시지 조회 오류: {e}")
-        return messages
+        self._messages_cache = messages
+
+    @property
+    def messages(self) -> List[BaseMessage]:
+        """세션의 모든 메시지 조회 (캐시 사용)"""
+        if self._messages_cache is None:
+            self._refresh_cache()
+        return self._messages_cache or []
 
     def add_message(self, message: BaseMessage) -> None:
         """새 메시지 추가"""
@@ -137,6 +144,9 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                         (self.session_id, message_type, message.content)
                     )
                     conn.commit()
+            # 캐시 업데이트
+            if self._messages_cache is not None:
+                self._messages_cache.append(message)
         except Exception as e:
             print(f"메시지 추가 오류: {e}")
 
@@ -150,13 +160,117 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                         (self.session_id,)
                     )
                     conn.commit()
+            self._messages_cache = []
         except Exception as e:
             print(f"메시지 삭제 오류: {e}")
 
 # --------------------
-# Utilities
+# 컨텍스트 추출기 (새로 추가)
 # --------------------
-def concat_context(docs: List[Document], max_chars: int = 4000, sep: str = "\n---\n"):
+class ContextExtractor:
+    """대화에서 브랜드/업종 컨텍스트 추출"""
+    
+    @staticmethod
+    def extract_brand_context(messages: List[BaseMessage]) -> Dict[str, Any]:
+        """최근 대화에서 브랜드/업종 정보 추출"""
+        context = {
+            "mentioned_brands": set(),
+            "mentioned_categories": set(),
+            "last_brand": None,
+            "last_category": None
+        }
+        
+        # 최근 5개 메시지만 확인 (너무 오래된 것은 제외)
+        recent_messages = messages[-5:] if len(messages) > 5 else messages
+        
+        brand_keywords = ["치킨", "피자", "버거", "카페", "네네", "교촌", "굽네", "BBQ"]
+        category_keywords = ["외식", "치킨", "피자", "햄버거", "카페", "베이커리"]
+        
+        for msg in reversed(recent_messages):  # 최신부터 확인
+            content = msg.content.lower()
+            
+            # 브랜드 키워드 찾기
+            for brand in brand_keywords:
+                if brand.lower() in content:
+                    context["mentioned_brands"].add(brand)
+                    if not context["last_brand"]:
+                        context["last_brand"] = brand
+            
+            # 카테고리 키워드 찾기
+            for category in category_keywords:
+                if category.lower() in content:
+                    context["mentioned_categories"].add(category)
+                    if not context["last_category"]:
+                        context["last_category"] = category
+        
+        return context
+
+# --------------------
+# 개선된 문서 필터링
+# --------------------
+def smart_document_filter(docs: List[Document], context: Dict[str, Any], 
+                         question: str) -> List[Document]:
+    """컨텍스트를 고려한 스마트 문서 필터링"""
+    
+    if not docs:
+        return docs
+    
+    # 1. 점수 기반 기본 필터링
+    scored_docs = [(d, _get_qdrant_score(d)) for d in docs]
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
+    
+    # 2. 컨텍스트 기반 가중치 적용
+    weighted_docs = []
+    question_lower = question.lower()
+    
+    for doc, score in scored_docs:
+        content = doc.page_content.lower()
+        metadata = doc.metadata or {}
+        
+        # 기본 점수
+        final_score = score
+        
+        # 브랜드 매칭 보너스
+        if context.get("last_brand"):
+            brand = context["last_brand"].lower()
+            if brand in content or brand in str(metadata.get("brand_name", "")).lower():
+                final_score += 0.15
+        
+        # 카테고리 매칭 보너스
+        if context.get("last_category"):
+            category = context["last_category"].lower()
+            if category in content or category in str(metadata.get("industry_medium", "")).lower():
+                final_score += 0.1
+        
+        # 질문 키워드 매칭 보너스
+        question_keywords = ["창업비용", "가격", "유의할점", "조건", "제한", "부담"]
+        for keyword in question_keywords:
+            if keyword in question_lower and keyword in content:
+                final_score += 0.05
+        
+        weighted_docs.append((doc, final_score))
+    
+    # 3. 최종 점수로 재정렬 및 필터링
+    weighted_docs.sort(key=lambda x: x[1], reverse=True)
+    
+    # 임계값 적용 (동적 조정)
+    min_threshold = MIN_SCORE
+    if context.get("last_brand") or context.get("last_category"):
+        min_threshold -= 0.05  # 컨텍스트가 있으면 임계값 완화
+    
+    filtered_docs = [doc for doc, score in weighted_docs if score >= min_threshold]
+    
+    # 최소 3개는 보장
+    if len(filtered_docs) < 3 and len(weighted_docs) >= 3:
+        filtered_docs = [doc for doc, _ in weighted_docs[:3]]
+    
+    return filtered_docs[:FINAL_TOPK]
+
+# --------------------
+# Utilities (개선됨)
+# --------------------
+def concat_context(docs: List[Document], max_chars: int = 5000, sep: str = "\n---\n"):
+    """문서들을 컨텍스트로 결합 (길이 제한 증가)"""
     out, n = [], 0
     for d in docs:
         t = (d.page_content or "").strip()
@@ -182,12 +296,17 @@ def _get_qdrant_score(d: Document) -> float:
     return float(getattr(d, "score", 0.0))
 
 # --------------------
-# Prompts
+# 개선된 Prompts
 # --------------------
 ANSWER_PROMPT = ChatPromptTemplate.from_template("""
-당신은 질의응답 보조자입니다. 아래 컨텍스트만을 사용하여 질문에 답하세요.
-모르면 모른다고 하세요. 한국어(존댓말)로 간결히 답변합니다.
-항상 "[질문에서 언급된 주체]는/은 [답변]입니다." 형태로 시작하세요.
+당신은 프랜차이즈 전문 질의응답 보조자입니다. 아래 컨텍스트만을 사용하여 질문에 정확하게 답하세요.
+
+**답변 규칙:**
+1. 컨텍스트에 정보가 있으면 그 정보만을 사용하여 답변
+2. 정보가 없거나 불충분하면 "해당 정보를 찾을 수 없습니다"라고 답변
+3. 한국어 존댓말로 간결하고 정확하게 답변
+4. 구체적인 수치나 조건이 있으면 명시
+5. 답변 형식: "[주체]는/은 [구체적 답변]입니다."
 
 # 질문: {question}
 
@@ -199,7 +318,19 @@ ANSWER_PROMPT = ChatPromptTemplate.from_template("""
 
 CONTEXTUALIZE_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", "주어진 대화 기록과 마지막 질문을 사용하여, 대화의 맥락을 모르는 사람도 이해할 수 있는 완전한 독립형 질문으로 재구성하세요. 질문 외에 다른 말은 덧붙이지 마세요."),
+        ("system", """주어진 대화 기록과 최신 질문을 바탕으로 완전한 독립형 질문으로 재구성하세요.
+
+**재구성 규칙:**
+1. 대화에서 언급된 특정 브랜드나 업종을 질문에 포함
+2. "그것", "그거", "이것" 같은 대명사를 구체적인 명사로 교체
+3. 이전 맥락의 핵심 정보를 질문에 통합
+4. 질문 외에 다른 설명은 추가하지 않음
+
+예시:
+- 이전 대화: "네네치킨에 대해 알고 싶어요"
+- 현재 질문: "창업비용은?"
+- 재구성된 질문: "네네치킨 창업비용은?"
+"""),
         MessagesPlaceholder("chat_history"),
         ("user", "{question}"),
     ]
@@ -216,7 +347,7 @@ class GraphState(TypedDict):
     chat_history: List[BaseMessage]
 
 # --------------------
-# Memory-Aware RAG Chain
+# 개선된 Memory-Aware RAG Chain
 # --------------------
 class MemoryAwareRAGChain:
     def __init__(self, retriever, llm, get_session_history):
@@ -224,9 +355,10 @@ class MemoryAwareRAGChain:
         self.llm = llm
         self.get_session_history = get_session_history
         self.contextualize_q_chain = CONTEXTUALIZE_QUESTION_PROMPT | llm | StrOutputParser()
+        self.context_extractor = ContextExtractor()
 
     def invoke(self, input_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        """메모리 기능을 포함한 RAG 처리"""
+        """메모리 기능을 포함한 개선된 RAG 처리"""
         session_id = config.get("configurable", {}).get("session_id")
         if not session_id:
             raise ValueError("session_id가 config에 없습니다.")
@@ -236,46 +368,56 @@ class MemoryAwareRAGChain:
         chat_history = history.messages
         
         question = input_data["question"]
+        print(f"=== RAG 처리 시작 ===")
+        print(f"원본 질문: {question}")
+        print(f"기존 대화 기록: {len(chat_history)}개 메시지")
         
-        # 사용자 메시지 저장
-        history.add_message(HumanMessage(content=question))
+        # 컨텍스트 추출
+        context_info = self.context_extractor.extract_brand_context(chat_history)
+        print(f"추출된 컨텍스트: {context_info}")
         
         # 대화 기록이 있으면 질문을 맥락화
         if chat_history:
-            print(f"대화 기록 발견: {len(chat_history)}개 메시지")
             contextualized_question = self.contextualize_q_chain.invoke(
                 {"question": question, "chat_history": chat_history}
             )
-            print(f"원본 질문: {question}")
             print(f"맥락화된 질문: {contextualized_question}")
         else:
             contextualized_question = question
             print("대화 기록 없음, 원본 질문 사용")
         
         # 문서 검색 (맥락화된 질문으로)
-        docs = self.retriever.invoke(contextualized_question)
-        print(f"검색된 문서 수: {len(docs)}")
+        raw_docs = self.retriever.invoke(contextualized_question)
+        print(f"검색된 원본 문서 수: {len(raw_docs)}")
         
-        # 점수 필터링 및 상위 K개 선택
-        filtered_docs = [d for d in docs if _get_qdrant_score(d) >= MIN_SCORE]
-        if not filtered_docs:
-            filtered_docs = docs
-        final_docs = filtered_docs[:FINAL_TOPK]
-        print(f"최종 사용 문서 수: {len(final_docs)}")
+        # 스마트 필터링 적용
+        final_docs = smart_document_filter(raw_docs, context_info, question)
+        print(f"필터링 후 최종 문서 수: {len(final_docs)}")
+        
+        # 사용된 문서의 브랜드 정보 출력 (더 상세하게)
+        for i, doc in enumerate(final_docs):
+            brand = doc.metadata.get("brand_name", "N/A")
+            category = doc.metadata.get("industry_medium", "N/A")
+            section = doc.metadata.get("section_name", "N/A")[:50]  # 50자까지만
+            score = _get_qdrant_score(doc)
+            print(f"문서 {i+1}: {brand} ({category}) | {section}... | 점수: {score:.3f}")
         
         # 답변 생성 (원본 질문으로)
-        ctx = concat_context(final_docs)
-        rag_chain = (
-            RunnablePassthrough.assign(context=lambda x: ctx)
-            | ANSWER_PROMPT
-            | self.llm
-            | StrOutputParser()
-        )
+        if not final_docs:
+            answer = "요청하신 정보를 찾을 수 없습니다. 더 구체적인 질문을 해주시면 도움을 드릴 수 있습니다."
+        else:
+            ctx = concat_context(final_docs)
+            rag_chain = (
+                RunnablePassthrough.assign(context=lambda x: ctx)
+                | ANSWER_PROMPT
+                | self.llm
+                | StrOutputParser()
+            )
+            answer = rag_chain.invoke({"question": question})
         
-        answer = rag_chain.invoke({"question": question})
         print(f"생성된 답변: {answer}")
         
-        # 이제 대화 기록에 저장 (질문과 답변 모두)
+        # 대화 기록에 저장
         history.add_message(HumanMessage(content=question))
         history.add_message(AIMessage(content=answer))
         
@@ -286,7 +428,7 @@ class MemoryAwareRAGChain:
         }
 
 # --------------------
-# FastAPI App
+# FastAPI App (기존과 동일하지만 개선된 체인 사용)
 # --------------------
 class QuestionRequest(BaseModel):
     question: str
@@ -299,7 +441,7 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + PostgreSQL Memory)", version="4.1.0")
+app = FastAPI(title="프랜차이즈 QA API (개선된 메모리)", version="4.2.0")
 
 # PostgreSQL 연결 정보
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -328,7 +470,7 @@ def on_startup():
     retriever, collection = build_qdrant_vectorstore(embeddings)
     llm = build_llm()
     
-    # 메모리 인식 RAG 체인 생성
+    # 개선된 메모리 인식 RAG 체인 생성
     app.state.memory_rag_chain = MemoryAwareRAGChain(retriever, llm, get_session_history)
     app.state.collection = collection
 
@@ -387,11 +529,19 @@ def get_debug_history(session_id: str):
         session_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, session_id.strip()))
         history = get_session_history(session_uuid)
         messages = history.messages
+        context_info = ContextExtractor.extract_brand_context(messages)
+        
         return {
             "session_id": session_id,
             "session_uuid": session_uuid,
             "message_count": len(messages),
-            "messages": [{"type": type(msg).__name__, "content": msg.content} for msg in messages]
+            "context_info": {
+                "mentioned_brands": list(context_info["mentioned_brands"]),
+                "mentioned_categories": list(context_info["mentioned_categories"]),
+                "last_brand": context_info["last_brand"],
+                "last_category": context_info["last_category"]
+            },
+            "messages": [{"type": type(msg).__name__, "content": msg.content} for msg in messages[-10:]]  # 최근 10개만
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
