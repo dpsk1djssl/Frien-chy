@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # main_inference_final.py
-# LangGraph의 유연한 구조와 PostgreSQL 기반 영구 메모리 기능을 결합한 최종 버전
+# LangGraph의 유연한 구조와 PostgreSQL 기반 영구 메모리 기능을 결합한 최종 버전 (피드백 반영)
 
 import os
 import uuid
@@ -24,7 +24,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import Qdrant as LCQdrant
 from qdrant_client import QdrantClient
-from sentence_transformers import CrossEncoder
 
 # PostgreSQL 관련 import
 import psycopg
@@ -33,14 +32,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 # --------------------
 # Config
 # --------------------
-CFG_NAME = "LangGraph_With_PostgreSQL_v3.5"
+CFG_NAME = "LangGraph_With_PostgreSQL_v4.0"
 EMBED_MODEL = "nlpai-lab/KURE-v1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 K_RETRIEVE = 10
-PRE_CUT_TOPN = 5
-FINAL_TOPK = 5
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+FINAL_TOPK = 5  # 리랭킹 제거로 단순화
 MIN_SCORE = float(os.getenv("QDRANT_MIN_SCORE", "0.5"))
 
 # --------------------
@@ -72,14 +69,12 @@ def build_qdrant_vectorstore(embeddings):
     return vs.as_retriever(search_kwargs={"k": K_RETRIEVE}), collection
 
 def build_llm():
+    # Gemini Flash → Pro로 변경
     return ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-1.5-pro",
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.1,
     )
-
-def build_reranker_model():
-    return CrossEncoder(RERANK_MODEL, device=DEVICE)
 
 # --------------------
 # Custom PostgreSQL Chat Message History
@@ -91,10 +86,9 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
         self.session_id = session_id
         self.connection_string = connection_string
         self.table_name = table_name
-        
         # 테이블 생성
         self._create_table_if_not_exists()
-    
+
     def _create_table_if_not_exists(self):
         """메시지 저장 테이블이 없으면 생성"""
         with psycopg.connect(self.connection_string) as conn:
@@ -108,14 +102,13 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
-                
                 # 인덱스 생성
                 cur.execute(f"""
                     CREATE INDEX IF NOT EXISTS idx_{self.table_name}_session_id 
                     ON {self.table_name} (session_id);
                 """)
                 conn.commit()
-    
+
     @property
     def messages(self) -> List[BaseMessage]:
         """세션의 모든 메시지 조회"""
@@ -135,9 +128,8 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                             messages.append(AIMessage(content=content))
         except Exception as e:
             print(f"메시지 조회 오류: {e}")
-        
         return messages
-    
+
     def add_message(self, message: BaseMessage) -> None:
         """새 메시지 추가"""
         try:
@@ -152,7 +144,7 @@ class CustomPostgresChatMessageHistory(BaseChatMessageHistory):
                     conn.commit()
         except Exception as e:
             print(f"메시지 추가 오류: {e}")
-    
+
     def clear(self) -> None:
         """세션의 모든 메시지 삭제"""
         try:
@@ -188,8 +180,10 @@ def _get_qdrant_score(d: Document) -> float:
     md = d.metadata or {}
     for k in ("_qdrant_score", "score", "similarity"):
         if k in md:
-            try: return float(md[k])
-            except: pass
+            try: 
+                return float(md[k])
+            except: 
+                pass
     return float(getattr(d, "score", 0.0))
 
 # --------------------
@@ -217,7 +211,7 @@ CONTEXTUALIZE_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 # --------------------
-# LangGraph State & Definition
+# LangGraph State & Definition (리랭킹 제거)
 # --------------------
 class GraphState(TypedDict):
     question: str
@@ -226,8 +220,7 @@ class GraphState(TypedDict):
     used_docs: List[Dict]
     chat_history: List[Any]
 
-def build_graph(retriever, reranker_model, llm):
-    
+def build_graph(retriever, llm):
     contextualize_q_chain = CONTEXTUALIZE_QUESTION_PROMPT | llm | StrOutputParser()
     
     def contextualize_question(state: GraphState):
@@ -244,36 +237,25 @@ def build_graph(retriever, reranker_model, llm):
         return {"docs": docs, "question": state["question"]}
 
     def filter_docs(state: GraphState):
+        # 점수 필터링
         docs = [d for d in state["docs"] if _get_qdrant_score(d) >= MIN_SCORE]
-        if not docs: docs = state["docs"]
-        return {"docs": docs}
-
-    def precut(state: GraphState):
-        return {"docs": state["docs"][:PRE_CUT_TOPN]}
-
-    def rerank(state: GraphState):
-        question = state["question"]
-        docs = state["docs"]
         if not docs:
-            return {"docs": []}
-            
-        pairs = [[question, doc.page_content] for doc in docs]
-        scores = reranker_model.predict(pairs)
-        scored_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        reranked_docs = [doc for score, doc in scored_docs[:FINAL_TOPK]]
-        return {"docs": reranked_docs}
+            docs = state["docs"]
+        # 상위 K개만 선택 (리랭킹 대신 단순 절삭)
+        return {"docs": docs[:FINAL_TOPK]}
 
     def generate_answer(state: GraphState):
         question = state["question"]
         docs = state["docs"]
-        
         ctx = concat_context(docs)
+        
         rag_chain = (
             RunnablePassthrough.assign(context=lambda x: ctx)
             | ANSWER_PROMPT
             | llm
             | StrOutputParser()
         )
+        
         answer = rag_chain.invoke({"question": question})
         
         return {
@@ -281,20 +263,17 @@ def build_graph(retriever, reranker_model, llm):
             "used_docs": [serialize_doc(d) for d in docs]
         }
 
+    # 그래프 구성 (리랭킹 노드 제거)
     graph = StateGraph(GraphState)
     graph.add_node("contextualize_question", contextualize_question)
     graph.add_node("retrieval", retrieve)
-    graph.add_node("filter", filter_docs)
-    graph.add_node("precut", precut)
-    graph.add_node("rerank", rerank)
+    graph.add_node("filter", filter_docs)  # 필터링과 절삭을 한 번에 처리
     graph.add_node("generate_answer", generate_answer)
 
     graph.set_entry_point("contextualize_question")
     graph.add_edge("contextualize_question", "retrieval")
     graph.add_edge("retrieval", "filter")
-    graph.add_edge("filter", "precut")
-    graph.add_edge("precut", "rerank")
-    graph.add_edge("rerank", "generate_answer")
+    graph.add_edge("filter", "generate_answer")
     graph.add_edge("generate_answer", END)
 
     return graph.compile()
@@ -313,7 +292,7 @@ class AnswerResponse(BaseModel):
     status: str
     cfg: str
 
-app = FastAPI(title="프랜차이즈 QA API (LangGraph + PostgreSQL Memory)", version="3.5.0")
+app = FastAPI(title="프랜차이즈 QA API (LangGraph + PostgreSQL Memory)", version="4.0.0")
 
 # PostgreSQL 연결 정보
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -340,17 +319,16 @@ def on_startup():
     
     embeddings = build_embeddings()
     retriever, collection = build_qdrant_vectorstore(embeddings)
-    reranker_model = build_reranker_model()
-    llm = build_llm()
+    llm = build_llm()  # 리랭킹 모델 제거
+    graph = build_graph(retriever, llm)  # 리랭킹 모델 파라미터 제거
     
-    graph = build_graph(retriever, reranker_model, llm)
-    
+    # 메모리 기능 수정: 올바른 키 매핑
     app.state.chain_with_history = RunnableWithMessageHistory(
         graph,
         get_session_history,
         input_messages_key="question",
         history_messages_key="chat_history",
-        output_messages_key="answer",
+        # output_messages_key 제거 - 이것이 문제였을 수 있음
     )
     app.state.collection = collection
 
@@ -360,15 +338,16 @@ def ask(req: QuestionRequest):
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
     if not req.session_id.strip():
         raise HTTPException(status_code=400, detail="session_id가 비어 있습니다.")
-        
+    
     try:
         session_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, req.session_id.strip()))
-        
         config = {"configurable": {"session_id": session_uuid}}
+        
         result = app.state.chain_with_history.invoke(
-            {"question": req.question.strip()}, 
+            {"question": req.question.strip()},
             config=config
         )
+        
         return AnswerResponse(
             question=req.question.strip(),
             answer=result["answer"],
@@ -389,7 +368,7 @@ def health_check():
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
-                db_status = "connected"
+        db_status = "connected"
     except Exception as e:
         db_status = f"error: {str(e)}"
     
