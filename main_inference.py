@@ -251,8 +251,8 @@ class MemoryAwareRAGChain:
         else:
             contextualized_question = question
             print("대화 기록 없음, 원본 질문 사용")
-
-        # 문서 검색
+        
+        # 문서 검색 (맥락화된 질문으로)
         docs = self.retriever.invoke(contextualized_question)
         print(f"검색된 문서 수: {len(docs)}")
         
@@ -263,7 +263,7 @@ class MemoryAwareRAGChain:
         final_docs = filtered_docs[:FINAL_TOPK]
         print(f"최종 사용 문서 수: {len(final_docs)}")
         
-        # 답변 생성
+        # 답변 생성 (원본 질문으로)
         ctx = concat_context(final_docs)
         rag_chain = (
             RunnablePassthrough.assign(context=lambda x: ctx)
@@ -275,7 +275,8 @@ class MemoryAwareRAGChain:
         answer = rag_chain.invoke({"question": question})
         print(f"생성된 답변: {answer}")
         
-        # AI 응답 저장
+        # 이제 대화 기록에 저장 (질문과 답변 모두)
+        history.add_message(HumanMessage(content=question))
         history.add_message(AIMessage(content=answer))
         
         return {
